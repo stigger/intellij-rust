@@ -25,6 +25,7 @@ import org.rust.lang.core.types.infer.substitute
 import org.rust.lang.core.types.ty.*
 import org.rust.lang.core.types.type
 import org.rust.openapiext.Testmark
+import org.rust.openapiext.hitOnFalse
 import org.rust.openapiext.toPsiFile
 
 // IntelliJ Rust name resolution algorithm.
@@ -400,18 +401,22 @@ fun processAssocTypeVariants(trait: RsTraitItem, processor: RsResolveProcessor):
     return false
 }
 
-val RsFile.exportedCrateMacros: List<RsMacroDefinition>
-    get() = CachedValuesManager.getCachedValue(this) {
-        val macros = exportedCrateMacros(this, true)
-        CachedValueProvider.Result.create(macros, PsiModificationTracker.MODIFICATION_COUNT)
+private fun exportedCrateMacros(scope: RsItemsOwner, needExport: Boolean): List<RsMacroDefinition> {
+    // This code is duplicated specially because of how caches work
+    return if (needExport) {
+        CachedValuesManager.getCachedValue(scope) {
+            val macros = exportedCrateMacrosInternal(scope, true)
+            CachedValueProvider.Result.create(macros, PsiModificationTracker.MODIFICATION_COUNT)
+        }
+    } else {
+        CachedValuesManager.getCachedValue(scope) {
+            val macros = exportedCrateMacrosInternal(scope, false)
+            CachedValueProvider.Result.create(macros, PsiModificationTracker.MODIFICATION_COUNT)
+        }
     }
-
-fun Testmark.hitOnFalse(b: Boolean): Boolean {
-    if (!b) hit()
-    return b
 }
 
-private fun exportedCrateMacros(scope: RsItemsOwner, needExport: Boolean): List<RsMacroDefinition> {
+private fun exportedCrateMacrosInternal(scope: RsItemsOwner, needExport: Boolean): List<RsMacroDefinition> {
     val result = mutableListOf<RsMacroDefinition>()
     loop@ for (item in scope.itemsAndMacros) {
         when (item) {
@@ -424,11 +429,11 @@ private fun exportedCrateMacros(scope: RsItemsOwner, needExport: Boolean): List<
                         ?.metaItem?.metaItemArgs?.metaItemList
                         ?.mapNotNull { it.referenceName } ?: continue@loop
                     val mod = item.reference.resolve() as? RsFile ?: continue@loop
-                    val internalMacros = mod.exportedCrateMacros
+                    val internalMacros = exportedCrateMacros(mod, needExport = true)
                     result.addAll(internalMacros.filter { reexport.contains(it.name) })
                 } else if (missingMacroUse.hitOnFalse(item.hasMacroUse)) {
                     val mod = item.reference.resolve() as? RsFile ?: continue@loop
-                    result.addAll(mod.exportedCrateMacros)
+                    result.addAll(exportedCrateMacros(mod, needExport = true))
                 }
 
             is RsModDeclItem ->
@@ -453,7 +458,7 @@ private fun processItemMacroDeclarations(
     processor: RsResolveProcessor,
     addStdCrate: Boolean = false
 ): Boolean {
-    val macros = exportedCrateMacros(scope, false)
+    val macros = exportedCrateMacros(scope, needExport = false)
     if (processAll(macros, processor)) return true
 
     if (addStdCrate) {
@@ -461,7 +466,7 @@ private fun processItemMacroDeclarations(
             ?.crateRoot
             ?.toPsiFile(scope.project)
             ?.rustMod
-        if (prelude is RsFile && processAll(prelude.exportedCrateMacros, processor)) return true
+        if (prelude is RsFile && processAll(exportedCrateMacros(prelude, needExport = true), processor)) return true
     }
     return false
 }
